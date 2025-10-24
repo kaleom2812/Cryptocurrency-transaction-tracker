@@ -1,0 +1,366 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Last 10 transactions — Address from TX</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+  <link href="https://unpkg.com/vis-network/styles/vis-network.min.css" rel="stylesheet" />
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <style>
+    body { background: #0f172a; color: #fff; font-family: Inter, sans-serif; }
+    .wrap { max-width: 1000px; margin: 36px auto; padding: 18px; }
+    .glass { background: rgba(30,41,59,0.75); border-radius: 12px; padding: 18px; border: 1px solid rgba(255,255,255,0.03); }
+    .muted { color: #9ca3af; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { padding: 10px 8px; font-size: 0.95rem; }
+    tr + tr td { border-top: 1px solid rgba(255,255,255,0.03); }
+    .mono { font-family: "Source Code Pro", monospace; }
+    .btn { background: linear-gradient(90deg,#3b82f6,#8b5cf6); padding:8px 12px; border-radius:8px; color:white; font-weight:600; }
+    .small { font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="glass">
+      <h1 class="text-2xl font-semibold">🔎 Last 10 transactions from wallet (derived from a TX)</h1>
+      <p class="muted small mt-1">Provide a transaction hash and chain; the app extracts the <strong>from</strong> address from that tx and lists recent transactions for that address.</p>
+
+      <form method="get" action="{% url 'last10_from_tx' %}" class="mt-4 flex gap-3">
+        <input name="q" placeholder="Paste transaction hash (0x...)" value="{{ query }}" class="flex-1 p-3 rounded-lg bg-[#071226] border border-[#1f2a44]" />
+        <select name="chain" class="p-3 rounded-lg bg-[#071226] border border-[#1f2a44]">
+          {% for c in chains %}
+          <option value="{{ c }}" {% if chain == c %}selected{% endif %}>{{ c }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn">Get last 10</button>
+      </form>
+
+      {% if err %}
+        <div class="mt-4 p-3 bg-[#2b3346] rounded-md small">
+          ⚠️ {{ err }}
+        </div>
+      {% endif %}
+
+      {% if addr %}
+        <div class="mt-6 flex items-center justify-between">
+          <div>
+            <div class="muted">Address (from transaction)</div>
+            <div class="mono font-semibold">{{ addr }}</div>
+            {% if explorer_url_for_addr %}
+              <a href="{{ explorer_url_for_addr }}" target="_blank" class="small muted">View address on explorer →</a>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
+    {% if txs %}
+      <div class="glass mt-6">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Last {{ txs|length }} transactions</h2>
+          <div class="muted small">Newest first</div>
+        </div>
+
+        <div style="overflow:auto;">
+          <table>
+            <thead class="muted small">
+              <tr>
+                <th>Hash</th>
+                <th>To</th>
+                <th>Value (ETH)</th>
+                <th>Block</th>
+                <th>Time</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for t in txs %}
+                <tr>
+                  <td class="mono small">
+  <a href="{{ t.explorer_url }}" target="_blank" class="text-accent-blue">
+    {{ t.hash|slice:":10" }}…{{ t.hash|slice:"-6:" }}
+  </a>
+</td>
+<td class="small mono">
+  {% if t.to %}
+    <a href="{{ t.to_explorer_url }}" target="_blank">{{ t.to|slice:":10" }}…</a>
+  {% else %}
+    <span class="muted">Contract creation</span>
+  {% endif %}
+</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tree graph container -->
+      <div class="glass mt-6">
+        <h2 class="text-lg font-semibold mb-2">Transaction Flow Tree</h2>
+        <div id="tree-graph" style="height:500px;background:#fff;border-radius:8px;"></div>
+      </div>
+
+      <!-- JSON-safe data for JS -->
+      {{ txs|json_script:"last10-data" }}
+    {% endif %}
+  </div>
+
+  <script>
+    // copy buttons
+    document.querySelectorAll('.copy-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=> {
+        navigator.clipboard.writeText(btn.dataset.copy || '').then(()=> {
+          btn.innerHTML = '<i class="fas fa-check"></i>';
+          setTimeout(()=> btn.innerHTML = '<i class="fas fa-copy"></i>', 1200);
+        });
+      });
+    });
+
+    // parse the txs JSON (if present) and render sparkline & convert wei -> ETH in table
+    (function(){
+      const script = document.getElementById('last10-data');
+      if (!script) return;
+      const txs = JSON.parse(script.textContent || '[]');
+
+      // Build values for sparkline
+      const values = txs.map(t => {
+        const vStr = t.value || '0';
+        // if vStr is integer string (wei) convert to ETH
+        let v = 0;
+        if (/^[0-9]+$/.test(String(vStr))) {
+          v = Number(vStr) / 1e18;
+        } else {
+          v = parseFloat(vStr) || 0;
+        }
+        return Number(v.toFixed(6));
+      });
+
+      // update table display
+      document.querySelectorAll('.value-cell').forEach((el, idx) => {
+        const v = values[idx] !== undefined ? values[idx] : (parseFloat(el.dataset.raw || 0)/1e18);
+        el.textContent = (v >= 0.000001) ? (v + ' ETH') : (v === 0 ? '0' : v.toExponential(3) + ' ETH');
+      });
+
+      // draw sparkline with Chart.js
+      const ctx = document.getElementById('sparkline');
+      if (ctx && values.length) {
+        new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: values.map((_,i)=>i+1),
+            datasets: [{
+              data: values,
+              fill: true,
+              tension: 0.4,
+              borderColor: 'rgba(99,102,241,0.95)',
+              backgroundColor: 'rgba(99,102,241,0.12)',
+              pointRadius: 0,
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend:{display:false}, tooltip:{enabled:true} },
+            scales: { x:{display:false}, y:{display:false} },
+          }
+        });
+      }
+
+      // Show graph on button click
+      document.getElementById('show-graph-btn')?.addEventListener('click', function() {
+        document.getElementById('graph-container').style.display = '';
+        // Draw the graph only once
+        if (!window.graphDrawn) {
+          const script = document.getElementById('last10-data');
+          if (!script) return;
+          const txs = JSON.parse(script.textContent || '[]');
+          const values = txs.map(t => {
+            const vStr = t.value || '0';
+            let v = 0;
+            if (/^[0-9]+$/.test(String(vStr))) {
+              v = Number(vStr) / 1e18;
+            } else {
+              v = parseFloat(vStr) || 0;
+            }
+            return Number(v.toFixed(6));
+          });
+          const ctx = document.getElementById('full-graph');
+          if (ctx && values.length) {
+            new Chart(ctx, {
+              type: 'line',
+              data: {
+                labels: values.map((_,i)=>i+1),
+                datasets: [{
+                  data: values,
+                  fill: true,
+                  tension: 0.4,
+                  borderColor: 'rgba(99,102,241,0.95)',
+                  backgroundColor: 'rgba(99,102,241,0.12)',
+                  pointRadius: 2,
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend:{display:false}, tooltip:{enabled:true} },
+                scales: { x:{display:true}, y:{display:true} },
+              }
+            });
+            window.graphDrawn = true;
+          }
+        }
+      });
+    })();
+
+    {% if txs %}
+    // Transaction flow: address → transaction → address
+    const txs = JSON.parse(document.getElementById('last10-data').textContent || '[]');
+    const nodesMap = {};
+    const nodes = [];
+    const edges = [];
+
+    txs.forEach((tx, idx) => {
+      // From address node
+      if (tx.from && !nodesMap[tx.from]) {
+        nodes.push({
+          id: tx.from,
+          label: 'From:\n' + tx.from.slice(0, 10) + '…',
+          shape: 'ellipse',
+          color: '#6366f1',
+          font: { color: "#fff" }
+        });
+        nodesMap[tx.from] = true;
+      }
+      // To address node
+      let toId = tx.to ? tx.to : ('contract_' + idx);
+      if (tx.to && !nodesMap[tx.to]) {
+        nodes.push({
+          id: tx.to,
+          label: 'To:\n' + tx.to.slice(0, 10) + '…',
+          shape: 'ellipse',
+          color: '#0ea5e9',
+          font: { color: "#fff" }
+        });
+        nodesMap[tx.to] = true;
+      }
+      if (!tx.to && !nodesMap[toId]) {
+        nodes.push({
+          id: toId,
+          label: 'Contract\nCreation',
+          shape: 'box',
+          color: '#f59e42',
+          font: { color: "#fff" }
+        });
+        nodesMap[toId] = true;
+      }
+      // Transaction node
+      const txNodeId = 'tx_' + idx;
+      nodes.push({
+        id: txNodeId,
+        label: 'Tx\n' + tx.hash.slice(0, 8) + '…',
+        shape: 'box',
+        color: '#22d3ee',
+        font: { color: "#222" }
+      });
+      // Edge: from address → tx (removed ETH value label)
+      edges.push({
+        from: tx.from,
+        to: txNodeId,
+        arrows: "to",
+        color: "#6366f1"
+      });
+      // Edge: tx → to address
+      edges.push({
+        from: txNodeId,
+        to: toId,
+        arrows: "to",
+        color: "#0ea5e9"
+      });
+    });
+
+    const container = document.getElementById('tree-graph');
+    const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+    const options = {
+      layout: { hierarchical: { direction: "UD", sortMethod: "directed" } },
+      nodes: { borderWidth: 2, shadow: true },
+      edges: { smooth: true, shadow: true },
+      physics: false
+    };
+    const network = new vis.Network(container, data, options);
+
+    // Show full hash in popup on node click
+    network.on("click", function(params) {
+      // Remove any existing popup
+      document.getElementById('tx-popup')?.remove();
+
+      if (params.nodes.length === 1) {
+        const nodeId = params.nodes[0];
+        if (nodeId.startsWith('tx_')) {
+          const idx = parseInt(nodeId.split('_')[1]);
+          const tx = txs[idx];
+          if (!tx) return;
+
+          // Create popup
+          const popup = document.createElement('div');
+          popup.id = 'tx-popup';
+          popup.style.position = 'fixed';
+          popup.style.zIndex = '99999';
+          popup.style.background = '#1e293b';
+          popup.style.color = '#fff';
+          popup.style.padding = '14px 18px';
+          popup.style.borderRadius = '10px';
+          popup.style.boxShadow = '0 2px 12px rgba(0,0,0,0.18)';
+          popup.style.fontSize = '1rem';
+          popup.style.minWidth = '320px';
+          popup.style.maxWidth = '90vw';
+          // Clamp left position so popup doesn't go off screen
+          let left = params.event.pointer.DOM.x - 160;
+          left = Math.max(10, Math.min(left, window.innerWidth - 340));
+          popup.style.top = (params.event.pointer.DOM.y + 10) + 'px';
+          popup.style.left = left + 'px';
+
+          popup.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-weight:600;">Transaction Hash</span>
+              <button id="copy-tx-hash" style="background:#334155;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:0.95rem;">
+                <i class="fas fa-copy"></i> Copy
+              </button>
+            </div>
+            <div class="mono" style="word-break:break-all;margin-top:8px;">${tx.hash}</div>
+          `;
+
+          document.body.appendChild(popup);
+
+          // Copy button logic
+          document.getElementById('copy-tx-hash').onclick = function() {
+            navigator.clipboard.writeText(tx.hash).then(() => {
+              this.innerHTML = '<i class="fas fa-check"></i> Copied!';
+              setTimeout(() => {
+                this.innerHTML = '<i class="fas fa-copy"></i> Copy';
+              }, 1200);
+            });
+          };
+
+          // Remove popup on outside click or scroll
+          setTimeout(() => {
+            document.addEventListener('mousedown', function handler(e) {
+              if (!popup.contains(e.target)) {
+                popup.remove();
+                document.removeEventListener('mousedown', handler);
+              }
+            });
+            window.addEventListener('scroll', () => popup.remove(), { once: true });
+          }, 100);
+        }
+      }
+    });
+    {% endif %}
+  </script>
+</body>
+</html>

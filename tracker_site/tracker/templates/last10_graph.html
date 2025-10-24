@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Last 10 Transactions</title>
+
+  <!-- Tailwind CDN (you already use in project) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    .mono { font-family: "Source Code Pro", ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen p-6">
+  <div class="max-w-6xl mx-auto">
+    <header class="mb-6">
+      <h1 class="text-2xl font-semibold">Last 10 Transactions — Wallet: <span class="font-mono">{{ wallet }}</span></h1>
+      <p class="text-sm text-gray-600 mt-1">Query: <span class="mono">{{ query }}</span> — Chain: <strong>{{ chain|default:"N/A" }}</strong></p>
+    </header>
+
+    <!-- Summary -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div class="p-4 bg-white rounded shadow">
+        <div class="text-sm text-gray-500">Transactions found</div>
+        <div class="text-xl font-medium mt-1">{{ tx_count }}</div>
+      </div>
+      <div class="p-4 bg-white rounded shadow">
+        <div class="text-sm text-gray-500">Total value (sum of 10 txs)</div>
+        <div class="text-xl font-medium mt-1">{{ total_value_eth }} ETH</div>
+      </div>
+      <div class="p-4 bg-white rounded shadow flex items-center justify-between">
+        <div>
+          <div class="text-sm text-gray-500">Actions</div>
+          <div class="mt-1 flex gap-2">
+            <a href="{% url 'tx_search' %}?q={{ query|urlencode }}&chain={{ chain|urlencode }}" class="px-3 py-2 bg-blue-600 text-white rounded">Back to TX</a>
+            <a href="{% url 'download_tx_pdf_plain' %}?q={{ query|urlencode }}&chain={{ chain|urlencode }}" class="px-3 py-2 bg-green-600 text-white rounded">Download PDF</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Chart card -->
+    <section class="bg-white rounded shadow p-4 mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-medium">Value & Gas (last 10)</h2>
+        <div class="text-sm text-gray-500">Hover points for details</div>
+      </div>
+
+      <canvas id="txChart" height="120"></canvas>
+    </section>
+
+    <!-- Table of transactions -->
+    <section class="bg-white rounded shadow p-4">
+      <h3 class="text-lg font-medium mb-3">Transactions (newest → oldest)</h3>
+
+      {% if txs %}
+        <div class="overflow-x-auto">
+          <table class="w-full table-auto text-sm">
+            <thead class="text-left text-gray-600">
+              <tr>
+                <th class="px-3 py-2">#</th>
+                <th class="px-3 py-2">Hash</th>
+                <th class="px-3 py-2">Block</th>
+                <th class="px-3 py-2">Time (UTC)</th>
+                <th class="px-3 py-2">From</th>
+                <th class="px-3 py-2">To</th>
+                <th class="px-3 py-2">Value (ETH)</th>
+                <th class="px-3 py-2">Gas</th>
+                <th class="px-3 py-2">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for tx in txs %}
+                <tr class="{% cycle 'bg-white' 'bg-gray-50' %}">
+                  <td class="px-3 py-2 align-top">{{ forloop.counter }}</td>
+                  <td class="px-3 py-2 align-top mono">
+                    <a href="{% if chain == 'Ethereum Mainnet' %}https://etherscan.io/tx/{{ tx.hash }}{% else %}# {% endif %}" target="_blank" class="text-blue-600 break-all">{{ tx.hash }}</a>
+                  </td>
+                  <td class="px-3 py-2 align-top">{{ tx.block }}</td>
+                  <td class="px-3 py-2 align-top">{{ tx.timestamp }}</td>
+                  <td class="px-3 py-2 align-top mono break-all">{{ tx.from }}</td>
+                  <td class="px-3 py-2 align-top mono break-all">{{ tx.to }}</td>
+                  <td class="px-3 py-2 align-top">{{ tx.value_eth }}</td>
+                  <td class="px-3 py-2 align-top">{{ tx.gas }}</td>
+                  <td class="px-3 py-2 align-top">{{ tx.source }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="text-gray-600">No transactions to show.</p>
+      {% endif %}
+    </section>
+
+    <footer class="mt-6 text-sm text-gray-500">
+      Note: Values come from the node/explorer that the app queried. Arkham enrichments (labels) are optional.
+    </footer>
+  </div>
+
+  <script>
+    // Parse chart JSON prepared by the view
+    const payload = {{ chart_json|safe }} || {"labels": [], "values": [], "gas": [], "hashes": []};
+
+    const ctx = document.getElementById('txChart').getContext('2d');
+
+    // Create combined chart: values (line) and gas (bar)
+    const txChart = new Chart(ctx, {
+      data: {
+        labels: payload.labels || [],
+        datasets: [
+          {
+            type: 'line',
+            label: 'Value (ETH)',
+            data: payload.values || [],
+            yAxisID: 'y1',
+            borderColor: 'rgb(59,130,246)',
+            tension: 0.2,
+            pointRadius: 5,
+            fill: false
+          },
+          {
+            type: 'bar',
+            label: 'Gas',
+            data: payload.gas || [],
+            yAxisID: 'y2',
+            backgroundColor: 'rgba(99,102,241,0.6)'
+          }
+        ]
+      },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        stacked: false,
+        plugins: {
+          tooltip: {
+            callbacks: {
+              afterBody: function(context) {
+                // include tx hash (if available)
+                const idx = context[0].dataIndex;
+                if (payload.hashes && payload.hashes[idx]) {
+                  return ['Tx: ' + payload.hashes[idx]];
+                }
+                return [];
+              }
+            }
+          }
+        },
+        scales: {
+          y1: {
+            type: 'linear',
+            position: 'left',
+            title: { display: true, text: 'ETH' },
+            beginAtZero: true
+          },
+          y2: {
+            type: 'linear',
+            position: 'right',
+            title: { display: true, text: 'Gas' },
+            beginAtZero: true,
+            grid: { drawOnChartArea: false }
+          }
+        },
+        responsive: true,
+        maintainAspectRatio: false
+      }
+    });
+     // Show full hash in popup on node click
+    network.on("click", function(params) {
+      // Remove any existing popup
+      document.getElementById('tx-popup')?.remove();
+
+      if (params.nodes.length === 1) {
+        const nodeId = params.nodes[0];
+        if (nodeId.startsWith('tx_')) {
+          const idx = parseInt(nodeId.split('_')[1]);
+          const tx = txs[idx];
+          if (!tx) return;
+
+          // Create popup
+          const popup = document.createElement('div');
+          popup.id = 'tx-popup';
+          popup.style.position = 'fixed';
+          popup.style.zIndex = '99999';
+          popup.style.background = '#1e293b';
+          popup.style.color = '#fff';
+          popup.style.padding = '14px 18px';
+          popup.style.borderRadius = '10px';
+          popup.style.boxShadow = '0 2px 12px rgba(0,0,0,0.18)';
+          popup.style.fontSize = '1rem';
+          popup.style.minWidth = '320px';
+          popup.style.maxWidth = '90vw';
+          // Clamp left position so popup doesn't go off screen
+          let left = params.event.pointer.DOM.x - 160;
+          left = Math.max(10, Math.min(left, window.innerWidth - 340));
+          popup.style.top = (params.event.pointer.DOM.y + 10) + 'px';
+          popup.style.left = left + 'px';
+
+          popup.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-weight:600;">Transaction Hash</span>
+              <button id="copy-tx-hash" style="background:#334155;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:0.95rem;">
+                <i class="fas fa-copy"></i> Copy
+              </button>
+            </div>
+            <div class="mono" style="word-break:break-all;margin-top:8px;">${tx.hash}</div>
+          `;
+
+          document.body.appendChild(popup);
+
+          // Copy button logic
+          document.getElementById('copy-tx-hash').onclick = function() {
+            navigator.clipboard.writeText(tx.hash).then(() => {
+              this.innerHTML = '<i class="fas fa-check"></i> Copied!';
+              setTimeout(() => {
+                this.innerHTML = '<i class="fas fa-copy"></i> Copy';
+              }, 1200);
+            });
+          };
+
+          // Remove popup on outside click or scroll
+          setTimeout(() => {
+            document.addEventListener('mousedown', function handler(e) {
+              if (!popup.contains(e.target)) {
+                popup.remove();
+                document.removeEventListener('mousedown', handler);
+              }
+            });
+            window.addEventListener('scroll', () => popup.remove(), { once: true });
+          }, 100);
+        }
+      }
+    });
+    // Add click handler for chart points
+    document.getElementById('txChart').onclick = function(evt) {
+      const points = txChart.getElementsAtEventForMode(evt, 'nearest', { intersect: true }, true);
+      if (points.length) {
+        const idx = points[0].index;
+        const hash = payload.hashes && payload.hashes[idx] ? payload.hashes[idx] : null;
+        if (!hash) return;
+
+        // Remove any existing popup
+        document.getElementById('tx-popup')?.remove();
+
+        // Create popup
+        const popup = document.createElement('div');
+        popup.id = 'tx-popup';
+        popup.style.position = 'fixed';
+        popup.style.zIndex = '99999';
+        popup.style.background = '#1e293b';
+        popup.style.color = '#fff';
+        popup.style.padding = '14px 18px';
+        popup.style.borderRadius = '10px';
+        popup.style.boxShadow = '0 2px 12px rgba(0,0,0,0.18)';
+        popup.style.fontSize = '1rem';
+        popup.style.minWidth = '320px';
+        popup.style.maxWidth = '90vw';
+        // Position near mouse
+        let left = evt.clientX - 160;
+        left = Math.max(10, Math.min(left, window.innerWidth - 340));
+        popup.style.top = (evt.clientY + 10) + 'px';
+        popup.style.left = left + 'px';
+
+        popup.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-weight:600;">Transaction Hash</span>
+            <button id="copy-tx-hash" style="background:#334155;color:#fff;border:none;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:0.95rem;">
+              <i class="fas fa-copy"></i> Copy
+            </button>
+          </div>
+          <div class="mono" style="word-break:break-all;margin-top:8px;">${hash}</div>
+        `;
+
+        document.body.appendChild(popup);
+
+        // Copy button logic
+        document.getElementById('copy-tx-hash').onclick = function() {
+          navigator.clipboard.writeText(hash).then(() => {
+            this.innerHTML = '<i class="fas fa-check"></i> Copied!';
+            setTimeout(() => {
+              this.innerHTML = '<i class="fas fa-copy"></i> Copy';
+            }, 1200);
+          });
+        };
+
+        // Remove popup on outside click or scroll
+        setTimeout(() => {
+          document.addEventListener('mousedown', function handler(e) {
+            if (!popup.contains(e.target)) {
+              popup.remove();
+              document.removeEventListener('mousedown', handler);
+            }
+          });
+          window.addEventListener('scroll', () => popup.remove(), { once: true });
+        }, 100);
+      }
+    };
+    {% endif %}
+  </script>
+</body>
+</html>
